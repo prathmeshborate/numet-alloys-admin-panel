@@ -9,7 +9,7 @@ export async function POST(request) {
     if (!idToken) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    await adminAuth.verifyIdToken(idToken);
+    await adminAuth().verifyIdToken(idToken);
 
     const { title, body } = await request.json();
     const notificationPayload = {
@@ -18,13 +18,13 @@ export async function POST(request) {
     };
 
     // 1. Broadcast to Android APK users subscribed to 'stock_updates'
-    const topicResult = await adminMessaging.send({
+    const topicResult = await adminMessaging().send({
       topic: "stock_updates",
       notification: notificationPayload,
     });
 
     // 2. Broadcast to iOS/Web PWA tokens saved in Firestore
-    const tokensSnap = await adminDb.collection("push_tokens").get();
+    const tokensSnap = await adminDb().collection("push_tokens").get();
     const webTokens = tokensSnap.docs.map((doc) => doc.id).filter(Boolean);
 
     let webSuccessCount = 0;
