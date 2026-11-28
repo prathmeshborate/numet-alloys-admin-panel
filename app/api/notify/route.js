@@ -12,34 +12,80 @@ export async function POST(request) {
     await adminAuth().verifyIdToken(idToken);
 
     const { title, body } = await request.json();
-    const notificationPayload = {
-      title: title || "Numet Alloys — Ready Stock Updated",
-      body: body || "Latest stock availability has been updated. Tap to view.",
+    const baseMessage = {
+      notification: {
+        title: title || "Numet Alloys — Ready Stock Updated",
+        body: body || "Latest stock availability has been updated. Tap to view.",
+      },
+      data: {
+        click_action: "FLUTTER_NOTIFICATION_CLICK",
+        screen: "ready_stock",
+      },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "high_importance_channel",
+          sound: "default",
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: "default",
+          },
+        },
+      },
+      webpush: {
+        headers: {
+          Urgency: "high",
+          TTL: "86400",
+        },
+        notification: {
+          title: title || "Numet Alloys — Ready Stock Updated",
+          body: body || "Latest stock availability has been updated. Tap to view.",
+          icon: "/icons/Icon-192.png",
+        },
+      },
     };
 
-    // 1. Broadcast to Android APK users subscribed to 'stock_updates'
+    // 1. Broadcast to any Android devices subscribed to 'stock_updates' topic
     const topicResult = await adminMessaging().send({
+      ...baseMessage,
       topic: "stock_updates",
-      notification: notificationPayload,
     });
 
-    // 2. Broadcast to iOS/Web PWA tokens saved in Firestore
-    const tokensSnap = await adminDb().collection("push_tokens").get();
-    const webTokens = tokensSnap.docs.map((doc) => doc.id).filter(Boolean);
+    // 2. Fetch all registered tokens from 'fcm_tokens' (used by the Flutter app)
+    const tokensSnap = await adminDb().collection("fcm_tokens").get();
+    const tokenEntries = tokensSnap.docs
+      .map((doc) => ({
+        docId: doc.id,
+        token: doc.data()?.token || doc.id,
+      }))
+      .filter((entry) => Boolean(entry.token));
 
-    let webSuccessCount = 0;
-    if (webTokens.length > 0) {
-      const multicastResult = await adminMessaging.sendEachForMulticast({
-        tokens: webTokens,
-        notification: notificationPayload,
+    let deviceSuccessCount = 0;
+    let deviceFailureCount = 0;
+
+    if (tokenEntries.length > 0) {
+      const multicastResult = await adminMessaging().sendEachForMulticast({
+        ...baseMessage,
+        tokens: tokenEntries.map((e) => e.token),
       });
-      webSuccessCount = multicastResult.successCount;
 
-      // Remove invalid/expired tokens automatically
+      deviceSuccessCount = multicastResult.successCount;
+      deviceFailureCount = multicastResult.failureCount;
+
+      // Remove invalid or expired tokens automatically
       const cleanup = [];
       multicastResult.responses.forEach((resp, idx) => {
         if (!resp.success) {
-          cleanup.push(adminDb.collection("push_tokens").doc(webTokens[idx]).delete());
+          const errCode = resp.error?.code || "";
+          if (
+            errCode === "messaging/registration-token-not-registered" ||
+            errCode === "messaging/invalid-registration-token"
+          ) {
+            cleanup.push(adminDb().collection("fcm_tokens").doc(tokenEntries[idx].docId).delete());
+          }
         }
       });
       await Promise.all(cleanup);
@@ -48,10 +94,12 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       topicMessageId: topicResult,
-      webNotified: webSuccessCount,
+      totalTokensFound: tokenEntries.length,
+      devicesNotified: deviceSuccessCount,
+      devicesFailed: deviceFailureCount,
     });
   } catch (error) {
     console.error("Notify error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Server error" }, { status: 500 });
   }
 }
